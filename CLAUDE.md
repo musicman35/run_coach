@@ -1,0 +1,371 @@
+# Project: RunCoach AI
+
+## Overview
+Build a personalized AI running coach as a PWA with Python/FastAPI backend. The app generates training plans, syncs with Strava, exports structured workouts to .FIT files for Garmin watches, and provides chat support for training questions.
+
+## Tech Stack
+- **Frontend**: Svelte + Tailwind CSS (PWA)
+- **Backend**: FastAPI + Python 3.11+
+- **Database**: PostgreSQL (use Supabase or Railway)
+- **LLM**: Anthropic Claude API
+- **Activity Data**: Strava API
+- **Notifications**: Email (Resend or similar)
+- **Hosting**: Vercel (frontend), Railway or Render (backend)
+
+## Initial Setup
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+ (for frontend)
+- PostgreSQL (local or cloud)
+- uv (Python package manager) — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+### Backend Setup
+```bash
+cd backend
+uv init
+uv venv
+source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
+uv add fastapi uvicorn sqlalchemy asyncpg alembic pydantic-settings anthropic httpx python-multipart fit-tool
+uv add --dev pytest pytest-asyncio httpx
+```
+
+### Frontend Setup
+```bash
+cd frontend
+npx sv create .  # select Svelte 5, TypeScript, Tailwind
+npm install
+```
+
+## Project Structure
+```
+runcoach/
+├── backend/
+│   ├── src/runcoach/
+│   │   ├── __init__.py
+│   │   ├── main.py                 # FastAPI app entry
+│   │   ├── config.py               # Environment/settings
+│   │   ├── database.py             # DB connection
+│   │   ├── models/                 # SQLAlchemy models
+│   │   ├── schemas/                # Pydantic schemas
+│   │   ├── routers/
+│   │   │   ├── auth.py
+│   │   │   ├── users.py
+│   │   │   ├── goals.py
+│   │   │   ├── plans.py
+│   │   │   ├── workouts.py
+│   │   │   ├── strava.py
+│   │   │   ├── chat.py
+│   │   │   └── notifications.py
+│   │   ├── services/
+│   │   │   ├── llm.py              # Claude integration
+│   │   │   ├── plan_generator.py   # Training plan logic
+│   │   │   ├── fit_exporter.py     # .FIT file generation
+│   │   │   ├── strava_sync.py      # Strava OAuth + webhooks
+│   │   │   ├── memory.py           # Long-term memory summarization
+│   │   │   └── notifications.py    # Email sending
+│   │   └── utils/
+│   ├── tests/
+│   ├── alembic/                    # DB migrations
+│   ├── pyproject.toml
+│   └── README.md
+├── frontend/
+│   ├── src/
+│   │   ├── routes/
+│   │   ├── lib/
+│   │   ├── components/
+│   │   └── app.html
+│   ├── static/
+│   ├── package.json
+│   └── svelte.config.js
+└── README.md
+```
+
+## Phase 1: Foundation (Start Here)
+
+### Task 1.1: Backend Skeleton
+1. Initialize FastAPI project with the structure above
+2. Set up config.py with pydantic-settings for environment variables:
+   - DATABASE_URL
+   - ANTHROPIC_API_KEY
+   - STRAVA_CLIENT_ID
+   - STRAVA_CLIENT_SECRET
+   - RESEND_API_KEY (optional for now)
+3. Set up SQLAlchemy with async support
+4. Create all database models matching the schema provided below
+5. Set up Alembic for migrations
+6. Create initial migration and verify tables create correctly
+
+### Task 1.2: Simple Auth
+1. Implement invite-code based registration (no OAuth yet)
+2. Session-based auth with secure cookies
+3. Endpoints: POST /auth/register, POST /auth/login, POST /auth/logout, GET /auth/me
+
+### Task 1.3: User Profile
+1. CRUD endpoints for user profile
+2. Pydantic schemas with validation
+
+## Database Schema
+```sql
+-- Users
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    invite_code VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Strava OAuth tokens
+CREATE TABLE strava_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    strava_athlete_id BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- User profile (upfront data)
+CREATE TABLE user_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+    current_weekly_mileage_miles DECIMAL(5,2),
+    days_available_per_week INTEGER,
+    easy_pace_per_mile_seconds INTEGER,
+    injury_notes TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Goals (race or non-race)
+CREATE TABLE goals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    goal_type VARCHAR(20) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    target_race_distance_meters INTEGER,
+    target_race_date DATE,
+    target_time_seconds INTEGER,
+    target_weekly_mileage_miles DECIMAL(5,2),
+    status VARCHAR(20) DEFAULT 'active',
+    flagged_reason TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Training plans (generated by LLM, tied to a goal)
+CREATE TABLE training_plans (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    goal_id UUID REFERENCES goals(id) ON DELETE SET NULL,
+    title VARCHAR(200) NOT NULL,
+    methodology VARCHAR(100),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    status VARCHAR(20) DEFAULT 'active',
+    generation_context JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Scheduled workouts
+CREATE TABLE workouts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    training_plan_id UUID REFERENCES training_plans(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    scheduled_date DATE NOT NULL,
+    workout_type VARCHAR(30) NOT NULL,
+    title VARCHAR(200),
+    description TEXT,
+    structure JSONB NOT NULL,
+    estimated_duration_minutes INTEGER,
+    estimated_distance_meters INTEGER,
+    status VARCHAR(20) DEFAULT 'scheduled',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Workout edit history
+CREATE TABLE workout_edits (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workout_id UUID REFERENCES workouts(id) ON DELETE CASCADE,
+    edited_by VARCHAR(20) NOT NULL,
+    previous_structure JSONB NOT NULL,
+    new_structure JSONB NOT NULL,
+    edit_reason TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Raw Strava activities
+CREATE TABLE strava_activities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    strava_activity_id BIGINT UNIQUE NOT NULL,
+    raw_data JSONB NOT NULL,
+    activity_type VARCHAR(50),
+    start_date TIMESTAMP,
+    distance_meters DECIMAL(10,2),
+    moving_time_seconds INTEGER,
+    elapsed_time_seconds INTEGER,
+    average_heartrate DECIMAL(5,2),
+    max_heartrate DECIMAL(5,2),
+    average_pace_seconds_per_meter DECIMAL(10,6),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Link completed activities to scheduled workouts
+CREATE TABLE workout_completions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workout_id UUID REFERENCES workouts(id) ON DELETE CASCADE,
+    strava_activity_id UUID REFERENCES strava_activities(id) ON DELETE SET NULL,
+    completion_status VARCHAR(20) NOT NULL,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Chat history
+CREATE TABLE chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL,
+    content TEXT NOT NULL,
+    context_snapshot JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Long-term memory summaries
+CREATE TABLE user_memory_summaries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    summary_type VARCHAR(50) NOT NULL,
+    content TEXT NOT NULL,
+    source_date_range_start DATE,
+    source_date_range_end DATE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Notification queue
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    notification_type VARCHAR(30) NOT NULL,
+    channel VARCHAR(20) NOT NULL,
+    subject VARCHAR(200),
+    content TEXT NOT NULL,
+    scheduled_for TIMESTAMP NOT NULL,
+    sent_at TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_workouts_user_date ON workouts(user_id, scheduled_date);
+CREATE INDEX idx_strava_activities_user_date ON strava_activities(user_id, start_date);
+CREATE INDEX idx_chat_messages_user ON chat_messages(user_id, created_at);
+CREATE INDEX idx_goals_user_status ON goals(user_id, status);
+CREATE INDEX idx_notifications_scheduled ON notifications(status, scheduled_for);
+```
+
+## Workout Structure JSONB Schema
+```json
+{
+  "segments": [
+    {
+      "type": "warmup",
+      "duration_seconds": 600,
+      "distance_meters": null,
+      "pace_target": "easy",
+      "notes": "Easy jog"
+    },
+    {
+      "type": "interval",
+      "repeats": 6,
+      "work": {
+        "duration_seconds": null,
+        "distance_meters": 800,
+        "pace_target": "5K",
+        "notes": null
+      },
+      "recovery": {
+        "duration_seconds": null,
+        "distance_meters": 400,
+        "pace_target": "jog",
+        "notes": null
+      }
+    },
+    {
+      "type": "cooldown",
+      "duration_seconds": 600,
+      "distance_meters": null,
+      "pace_target": "easy",
+      "notes": null
+    }
+  ]
+}
+```
+
+## Key Implementation Notes
+
+### .FIT File Generation
+- Use the `fit-tool` library for writing .FIT files
+- This is a binary format — study the FIT SDK documentation
+- Start with a spike: create a simple interval workout and test loading it on a Garmin device before integrating
+- Endpoint: GET /workouts/{id}/fit — returns downloadable .FIT file
+
+### Strava Integration
+- OAuth2 authorization code flow
+- Store tokens in strava_tokens table, handle refresh
+- Register webhook for activity creation events
+- On new activity: store raw JSON, extract key fields, attempt to match to scheduled workout by date
+
+### LLM Plan Generation
+- Use Claude with structured output (JSON mode or tool use)
+- System prompt should include:
+  - Running methodology principles (Daniels, Pfitzinger, 80/20)
+  - User's profile data
+  - Current goals
+  - Recent training summary (from memory)
+  - Completed workout history summary
+- Output should match the workout structure JSONB schema
+
+### Memory System
+- Short-term: Last 10-20 chat messages included in context
+- Long-term: Periodic summarization job that creates user_memory_summaries
+  - Weekly training summaries
+  - Injury/issue notes
+  - User preferences learned from chat
+- Inject relevant summaries into LLM system prompt
+
+### Goal Feasibility Flagging
+- After each completed workout or weekly, evaluate:
+  - Is the user hitting target paces?
+  - Are they completing prescribed volume?
+  - Any injury notes?
+  - Compare goal time to current fitness indicators
+- If goal appears unrealistic, update goals.status to 'flagged_unrealistic' with reason
+
+## Environment Variables Needed
+```
+DATABASE_URL=postgresql+asyncpg://...
+ANTHROPIC_API_KEY=sk-ant-...
+STRAVA_CLIENT_ID=...
+STRAVA_CLIENT_SECRET=...
+RESEND_API_KEY=...
+```
+
+## Commands
+- `uv sync` — install dependencies
+- `alembic upgrade head` — run migrations
+- `uvicorn runcoach.main:app --reload` — run dev server
+- `pytest` — run tests
+
+## Important
+1. Start with Task 1.1 only. Do not proceed to other tasks until the foundation is solid.
+2. Write tests for auth and profile endpoints before moving on.
+3. Spike .FIT file generation early — create a separate script to test before integrating.
