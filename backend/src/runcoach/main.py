@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from runcoach.config import get_settings
+from runcoach.routers import auth
 
 settings = get_settings()
 
@@ -29,8 +30,5 @@ async def health_check() -> dict:
     return {"status": "healthy"}
 
 
-# Routers will be added here as we implement them
-# from runcoach.routers import auth, users, goals, plans, workouts, strava, chat, notifications
-# app.include_router(auth.router, prefix="/auth", tags=["auth"])
-# app.include_router(users.router, prefix="/users", tags=["users"])
-# etc.
+# Include routers
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
